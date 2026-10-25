@@ -1,4 +1,4 @@
-name: VNC-macOS
+name: RustDesk-macOS
 
 on:
   workflow_dispatch:
@@ -7,12 +7,12 @@ permissions:
   contents: read
 
 jobs:
-  vnc:
+  rustdesk:
     runs-on: macos-15   # Apple Silicon (ARM)
     timeout-minutes: 360
 
     steps:
-      - name: Create VNC user
+      - name: Create admin user (for macOS auth dialogs)
         env:
           MAC_USER: ${{ secrets.MAC_USER }}
           MAC_PASSWORD: ${{ secrets.MAC_PASSWORD }}
@@ -21,7 +21,6 @@ jobs:
             echo "MAC_USER or MAC_PASSWORD secret is missing."
             exit 1
           fi
-
           sudo dscl . -create "/Users/$MAC_USER"
           sudo dscl . -create "/Users/$MAC_USER" UserShell /bin/zsh
           sudo dscl . -create "/Users/$MAC_USER" RealName "$MAC_USER"
@@ -56,7 +55,12 @@ jobs:
           fi
           echo "TAILSCALE_IP=$TS_IP" >> "$GITHUB_ENV"
 
-      - name: Grant TCC permissions to Screen Sharing
+      - name: Install RustDesk
+        run: |
+          brew install --cask rustdesk
+          ls -la /Applications/RustDesk.app/Contents/MacOS/ || true
+
+      - name: Grant TCC permissions to RustDesk
         run: |
           DB="/Library/Application Support/com.apple.TCC/TCC.db"
 
@@ -67,71 +71,61 @@ jobs:
           }
 
           for svc in kTCCServiceScreenCapture kTCCServiceAccessibility kTCCServicePostEvent kTCCServiceListenEvent; do
-            grant "$svc" "com.apple.screensharing.agent" 0
-            grant "$svc" "com.apple.RemoteDesktopAgent" 0
-            grant "$svc" "/System/Library/CoreServices/RemoteManagement/screensharingd" 1
-            grant "$svc" "/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/MacOS/ARDAgent" 1
+            grant "$svc" "com.carriez.rustdesk" 0
+            grant "$svc" "/Applications/RustDesk.app/Contents/MacOS/RustDesk" 1
           done
 
-          # make tccd reload the database
           sudo killall tccd 2>/dev/null || true
           sleep 2
-          sudo sqlite3 "$DB" "select service,client,auth_value from access where client like '%screensharing%' or client like '%RemoteDesktop%' or client like '%ARDAgent%' or client like '%screensharingd%';"
+          sudo sqlite3 "$DB" "select service,client,auth_value from access where client like '%rustdesk%' or client like '%RustDesk%';"
 
-      - name: Enable Screen Sharing (VNC)
+      - name: Configure RustDesk (direct IP, permanent password)
         env:
-          VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
+          RUSTDESK_PASSWORD: ${{ secrets.RUSTDESK_PASSWORD }}
         run: |
-          if [ -z "$VNC_PASSWORD" ]; then
-            echo "VNC_PASSWORD secret is missing."
+          if [ -z "$RUSTDESK_PASSWORD" ]; then
+            echo "RUSTDESK_PASSWORD secret is missing."
             exit 1
           fi
-          # macOS only uses the first 8 characters of a VNC password
-          VNC_PW8="${VNC_PASSWORD:0:8}"
 
-          KICKSTART=/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart
+          CFG="$HOME/Library/Preferences/com.carriez.RustDesk"
+          mkdir -p "$CFG"
 
-          sudo "$KICKSTART" \
-            -activate -configure -access -on \
-            -allowAccessFor -allUsers -privs -all \
-            -clientopts -setmenuextra -menuextra yes
+          # Permanent password
+          cat > "$CFG/RustDesk.toml" <<EOF
+          password = '$RUSTDESK_PASSWORD'
+          EOF
 
-          sudo "$KICKSTART" \
-            -configure -clientopts \
-            -setvnclegacy -vnclegacy yes \
-            -setvncpw -vncpw "$VNC_PW8"
+          # Direct IP access + password-only approval (nobody is there to click "Accept")
+          cat > "$CFG/RustDesk2.toml" <<EOF
+          [options]
+          direct-server = 'Y'
+          approve-mode = 'password'
+          verification-method = 'use-permanent-password'
+          EOF
 
-          sudo "$KICKSTART" -restart -agent -console
+          # Best effort: also set the password through the CLI
+          sudo /Applications/RustDesk.app/Contents/MacOS/RustDesk --password "$RUSTDESK_PASSWORD" || echo "CLI password set failed (non-fatal)."
 
-      - name: Check VNC port
+      - name: Start RustDesk
         run: |
-          sleep 5
-          sudo lsof -iTCP:5900 -sTCP:LISTEN || echo "WARNING: nothing is listening on 5900"
-          nc -z -w 5 "$TAILSCALE_IP" 5900 && echo "VNC port reachable on Tailscale IP." || echo "WARNING: port 5900 not reachable on $TAILSCALE_IP"
-
-      - name: Diagnostics (black screen)
-        run: |
-          sw_vers || true
-          echo "--- SIP ---"
-          csrutil status || true
-          echo "--- console user ---"
-          stat -f%Su /dev/console || true
-          who || true
-          echo "--- displays ---"
-          system_profiler SPDisplaysDataType 2>&1 | head -25 || true
-          echo "--- screen sharing processes ---"
-          ps -axo pid,user,comm | grep -iE 'screensharing|ARDAgent|RemoteManagement|screencapture' | grep -v grep || true
-          echo "--- listening on 5900 ---"
-          sudo lsof -iTCP:5900 -sTCP:LISTEN || true
+          open -a RustDesk
+          sleep 15
+          ps -axo pid,user,comm | grep -i rustdesk | grep -v grep || echo "WARNING: RustDesk is not running"
+          echo "--- listening on 21118 ---"
+          sudo lsof -iTCP:21118 -sTCP:LISTEN || echo "WARNING: nothing is listening on 21118"
+          nc -z -w 5 "$TAILSCALE_IP" 21118 && echo "Direct port reachable on Tailscale IP." || echo "WARNING: 21118 not reachable on $TAILSCALE_IP"
+          echo "--- RustDesk logs (tail) ---"
+          for f in "$HOME"/Library/Logs/RustDesk/*.log; do [ -f "$f" ] && tail -n 15 "$f"; done 2>/dev/null || true
 
       - name: Keep alive
         run: |
           caffeinate -dimsu &
-          echo "=== VNC READY ==="
-          echo "Address: $TAILSCALE_IP"
-          echo "Username/Password: from your repo secrets"
-          echo "================="
+          echo "=== RUSTDESK READY ==="
+          echo "Connect to: $TAILSCALE_IP"
+          echo "Password: from your repo secrets (RUSTDESK_PASSWORD)"
+          echo "======================"
           while true; do
-            echo "[$(date)] VNC active"
+            echo "[$(date)] RustDesk active"
             sleep 300
           done
