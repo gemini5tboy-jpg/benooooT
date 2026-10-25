@@ -110,18 +110,26 @@ jobs:
       - name: Start RustDesk
         run: |
           APP="/Applications/RustDesk.app"
-          /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APP" || true
-          open "$APP" || {
-            echo "open failed, starting the binary directly"
-            nohup "$APP/Contents/MacOS/RustDesk" >/tmp/rustdesk.out 2>&1 &
-          }
+          BIN="$APP/Contents/MacOS/RustDesk"
+
+          # helper: run a command with a hard time limit (seconds)
+          tlimit() { perl -e 'alarm shift; exec @ARGV' "$@"; }
+
+          echo "Starting RustDesk server in the background..."
+          nohup "$BIN" --server >/tmp/rustdesk.out 2>&1 &
+          disown || true
           sleep 15
+
+          echo "--- processes ---"
           ps -axo pid,user,comm | grep -i rustdesk | grep -v grep || echo "WARNING: RustDesk is not running"
           echo "--- listening on 21118 ---"
-          sudo lsof -iTCP:21118 -sTCP:LISTEN || echo "WARNING: nothing is listening on 21118"
-          nc -z -w 5 "$TAILSCALE_IP" 21118 && echo "Direct port reachable on Tailscale IP." || echo "WARNING: 21118 not reachable on $TAILSCALE_IP"
+          tlimit 20 sudo lsof -iTCP:21118 -sTCP:LISTEN || echo "WARNING: nothing is listening on 21118"
+          tlimit 20 nc -z -w 5 "$TAILSCALE_IP" 21118 && echo "Direct port reachable on Tailscale IP." || echo "WARNING: 21118 not reachable on $TAILSCALE_IP"
+          echo "--- RustDesk output ---"
+          tail -n 25 /tmp/rustdesk.out 2>/dev/null || true
           echo "--- RustDesk logs (tail) ---"
           for f in "$HOME"/Library/Logs/RustDesk/*.log; do [ -f "$f" ] && tail -n 15 "$f"; done 2>/dev/null || true
+          exit 0
 
       - name: Keep alive
         run: |
