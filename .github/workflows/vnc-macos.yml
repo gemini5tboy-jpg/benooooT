@@ -109,7 +109,12 @@ jobs:
 
       - name: Start RustDesk
         run: |
-          open -a RustDesk
+          APP="/Applications/RustDesk.app"
+          /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APP" || true
+          open "$APP" || {
+            echo "open failed, starting the binary directly"
+            nohup "$APP/Contents/MacOS/RustDesk" >/tmp/rustdesk.out 2>&1 &
+          }
           sleep 15
           ps -axo pid,user,comm | grep -i rustdesk | grep -v grep || echo "WARNING: RustDesk is not running"
           echo "--- listening on 21118 ---"
