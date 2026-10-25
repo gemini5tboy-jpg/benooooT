@@ -1,0 +1,83 @@
+name: VNC-macOS
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  vnc:
+    runs-on: macos-15   # Apple Silicon (ARM)
+    timeout-minutes: 360
+
+    steps:
+      - name: Create VNC user
+        env:
+          MAC_USER: ${{ secrets.MAC_USER }}
+          MAC_PASSWORD: ${{ secrets.MAC_PASSWORD }}
+        run: |
+          if [ -z "$MAC_USER" ] || [ -z "$MAC_PASSWORD" ]; then
+            echo "MAC_USER or MAC_PASSWORD secret is missing."
+            exit 1
+          fi
+
+          sudo dscl . -create "/Users/$MAC_USER"
+          sudo dscl . -create "/Users/$MAC_USER" UserShell /bin/zsh
+          sudo dscl . -create "/Users/$MAC_USER" RealName "$MAC_USER"
+          sudo dscl . -create "/Users/$MAC_USER" UniqueID 1001
+          sudo dscl . -create "/Users/$MAC_USER" PrimaryGroupID 80
+          sudo dscl . -create "/Users/$MAC_USER" NFSHomeDirectory "/Users/$MAC_USER"
+          sudo dscl . -passwd "/Users/$MAC_USER" "$MAC_PASSWORD"
+          sudo dscl . -append /Groups/admin GroupMembership "$MAC_USER"
+          sudo createhomedir -c -u "$MAC_USER" || sudo mkdir -p "/Users/$MAC_USER"
+          echo "User created."
+
+      - name: Install and connect Tailscale
+        env:
+          TS_AUTHKEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+        run: |
+          brew install tailscale
+          sudo brew services start tailscale
+          sleep 5
+
+          sudo tailscale up --authkey="$TS_AUTHKEY" --hostname="gh-mac-$GITHUB_RUN_ID"
+
+          TS_IP=""
+          for i in $(seq 1 12); do
+            TS_IP=$(tailscale ip -4 2>/dev/null | head -n 1)
+            [ -n "$TS_IP" ] && break
+            sleep 5
+          done
+
+          if [ -z "$TS_IP" ]; then
+            echo "Tailscale IP not assigned."
+            exit 1
+          fi
+          echo "TAILSCALE_IP=$TS_IP" >> "$GITHUB_ENV"
+
+      - name: Enable Screen Sharing (VNC)
+        run: |
+          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
+            -activate -configure -access -on \
+            -allowAccessFor -allUsers -privs -all \
+            -clientopts -setmenuextra -menuextra yes \
+            -restart -agent -console
+
+      - name: Check VNC port
+        run: |
+          sleep 5
+          sudo lsof -iTCP:5900 -sTCP:LISTEN || echo "WARNING: nothing is listening on 5900"
+          nc -z -w 5 "$TAILSCALE_IP" 5900 && echo "VNC port reachable on Tailscale IP." || echo "WARNING: port 5900 not reachable on $TAILSCALE_IP"
+
+      - name: Keep alive
+        run: |
+          caffeinate -dimsu &
+          echo "=== VNC READY ==="
+          echo "Address: $TAILSCALE_IP"
+          echo "Username/Password: from your repo secrets"
+          echo "================="
+          while true; do
+            echo "[$(date)] VNC active"
+            sleep 300
+          done
