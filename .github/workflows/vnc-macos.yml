@@ -56,6 +56,28 @@ jobs:
           fi
           echo "TAILSCALE_IP=$TS_IP" >> "$GITHUB_ENV"
 
+      - name: Grant TCC permissions to Screen Sharing
+        run: |
+          DB="/Library/Application Support/com.apple.TCC/TCC.db"
+
+          grant() {
+            # $1=service  $2=client  $3=client_type (0=bundle id, 1=path)
+            sudo sqlite3 "$DB" "INSERT OR REPLACE INTO access (service,client,client_type,auth_value,auth_reason,auth_version,csreq,policy_id,indirect_object_identifier_type,indirect_object_identifier,indirect_object_code_identity,flags,last_modified) VALUES ('$1','$2',$3,2,4,1,NULL,NULL,0,'UNUSED',NULL,0,CAST(strftime('%s','now') AS INTEGER));" \
+              || echo "WARNING: failed to grant $1 to $2"
+          }
+
+          for svc in kTCCServiceScreenCapture kTCCServiceAccessibility kTCCServicePostEvent kTCCServiceListenEvent; do
+            grant "$svc" "com.apple.screensharing.agent" 0
+            grant "$svc" "com.apple.RemoteDesktopAgent" 0
+            grant "$svc" "/System/Library/CoreServices/RemoteManagement/screensharingd" 1
+            grant "$svc" "/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/MacOS/ARDAgent" 1
+          done
+
+          # make tccd reload the database
+          sudo killall tccd 2>/dev/null || true
+          sleep 2
+          sudo sqlite3 "$DB" "select service,client,auth_value from access where client like '%screensharing%' or client like '%RemoteDesktop%' or client like '%ARDAgent%' or client like '%screensharingd%';"
+
       - name: Enable Screen Sharing (VNC)
         env:
           VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
@@ -97,12 +119,10 @@ jobs:
           who || true
           echo "--- displays ---"
           system_profiler SPDisplaysDataType 2>&1 | head -25 || true
-          echo "--- TCC (system) ---"
-          ls -la "/Library/Application Support/com.apple.TCC/" || true
-          sudo sqlite3 "/Library/Application Support/com.apple.TCC/TCC.db" ".schema access" 2>&1 | head -20 || true
-          sudo sqlite3 "/Library/Application Support/com.apple.TCC/TCC.db" "select service,client,auth_value from access;" 2>&1 | head -40 || true
-          echo "--- TCC (user) ---"
-          sqlite3 "$HOME/Library/Application Support/com.apple.TCC/TCC.db" "select service,client,auth_value from access;" 2>&1 | head -40 || true
+          echo "--- screen sharing processes ---"
+          ps -axo pid,user,comm | grep -iE 'screensharing|ARDAgent|RemoteManagement|screencapture' | grep -v grep || true
+          echo "--- listening on 5900 ---"
+          sudo lsof -iTCP:5900 -sTCP:LISTEN || true
 
       - name: Keep alive
         run: |
