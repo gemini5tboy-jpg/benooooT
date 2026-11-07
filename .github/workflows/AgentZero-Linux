@@ -1,0 +1,99 @@
+name: AgentZero-Linux
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  agent-zero:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Check secrets
+        env:
+          RDP_USER: ${{ secrets.RDP_USER }}
+          RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
+          TS_AUTHKEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+        run: |
+          for v in RDP_USER RDP_PASSWORD TS_AUTHKEY; do
+            if [ -z "${!v}" ]; then echo "::error::secret for $v is missing"; exit 1; fi
+          done
+
+      - name: Install Tailscale
+        run: curl -fsSL https://tailscale.com/install.sh | sh
+
+      - name: Connect to Tailscale
+        env:
+          TS_AUTHKEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+        run: |
+          sudo tailscale up --authkey="$TS_AUTHKEY" --hostname="gh-a0-$GITHUB_RUN_ID" --accept-dns=false
+          TS_IP=""
+          for i in $(seq 1 12); do
+            TS_IP=$(tailscale ip -4 2>/dev/null | head -n1 || true)
+            [ -n "$TS_IP" ] && break
+            sleep 5
+          done
+          if [ -z "$TS_IP" ]; then echo "::error::Tailscale IP not assigned"; exit 1; fi
+          echo "TAILSCALE_IP=$TS_IP" >> "$GITHUB_ENV"
+
+      - name: Start Agent Zero
+        env:
+          AUTH_LOGIN: ${{ secrets.RDP_USER }}
+          AUTH_PASSWORD: ${{ secrets.RDP_PASSWORD }}
+        run: |
+          mkdir -p "$HOME/a0-data"
+          docker pull agent0ai/agent-zero:latest
+          # Published only on the Tailscale IP, not on the public interface
+          docker run -d --name agent-zero --restart unless-stopped \
+            -p "${TAILSCALE_IP}:50001:80" \
+            -e AUTH_LOGIN -e AUTH_PASSWORD \
+            -v "$HOME/a0-data:/a0/usr" \
+            agent0ai/agent-zero:latest
+
+      - name: Wait until UI is up
+        run: |
+          for i in $(seq 1 40); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "http://${TAILSCALE_IP}:50001/" || true)
+            if [ "$code" = "200" ] || [ "$code" = "302" ] || [ "$code" = "401" ]; then
+              echo "UI is up (HTTP $code)"; exit 0
+            fi
+            sleep 5
+          done
+          docker logs --tail 100 agent-zero
+          echo "::error::Agent Zero did not start"; exit 1
+
+      - name: Keep alive
+        timeout-minutes: 345
+        run: |
+          echo "=== AGENT ZERO READY ==="
+          echo "URL: http://$TAILSCALE_IP:50001"
+          echo "Login: RDP_USER / RDP_PASSWORD from repo secrets"
+          echo "(open it from a device connected to your Tailscale)"
+          echo "========================"
+          while true; do
+            echo "[$(date)] alive"
+            sleep 300
+          done
+
+      - name: Save data
+        if: always()
+        run: |
+          docker stop agent-zero || true
+          sudo chown -R "$USER":"$USER" "$HOME/a0-data" || true
+          tar -czf "$RUNNER_TEMP/a0-data.tar.gz" -C "$HOME" a0-data || true
+
+      - name: Upload data artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: a0-data
+          path: ${{ runner.temp }}/a0-data.tar.gz
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: Logout Tailscale
+        if: always()
+        run: sudo tailscale logout || true
