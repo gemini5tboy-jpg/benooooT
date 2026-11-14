@@ -86,7 +86,7 @@ jobs:
       - name: Install Python Packages
         shell: pwsh
         run: |
-          # قائمة المكتبات المطلوبة
+          # قائمة المكتبات المطلوبة (تمت إضافة urllib3 و requests)
           $packages = @(
               "curl_cffi",
               "phonenumbers",
@@ -94,7 +94,9 @@ jobs:
               "user-agents",
               "colorama",
               "faker",
-              "tlsmask"
+              "tlsmask",
+              "urllib3",
+              "requests"
           )
           # تثبيت كل مكتبة على حدة
           foreach ($pkg in $packages) {
@@ -106,6 +108,31 @@ jobs:
               }
           }
           Write-Host "All Python packages installed successfully."
+
+      - name: Install Node.js
+        shell: pwsh
+        run: |
+          # تحميل أحدث إصدار LTS من Node.js وتثبيته بصمت
+          Write-Host "Fetching latest Node.js LTS version..."
+          $nodeIndex = Invoke-RestMethod -Uri "https://nodejs.org/dist/index.json"
+          $ltsVersion = ($nodeIndex | Where-Object { $_.lts -ne $false } | Select-Object -First 1).version
+          if (-not $ltsVersion) {
+              Write-Error "Could not determine latest Node.js LTS version."
+              exit 1
+          }
+          Write-Host "Latest LTS version: $ltsVersion"
+
+          $msiUrl = "https://nodejs.org/dist/$ltsVersion/node-$ltsVersion-x64.msi"
+          $msiPath = "$env:TEMP\node-installer.msi"
+          Invoke-WebRequest -Uri $msiUrl -OutFile $msiPath
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$msiPath`"", "/quiet", "/norestart" -Wait
+          Remove-Item $msiPath -Force
+
+          # تحديث PATH للجلسة الحالية والتحقق من التثبيت
+          $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+          node --version
+          npm --version
+          Write-Host "Node.js installed."
 
       - name: Install Brave and Notepad++
         shell: pwsh
